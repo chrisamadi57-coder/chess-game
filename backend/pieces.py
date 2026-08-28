@@ -18,16 +18,16 @@ class Pawn(Piece):
 
     def is_valid_move(self, start_row, start_col, end_row, end_col, board):
         if self.color == "white":
-            directon = -1
+            direction = -1
             starting_row = 6
         else:
-            directon = 1
+            direction = 1
             starting_row = 1
 
         row_difference = end_row - start_row
         col_difference = end_col - start_col
 
-        if col_difference == 0 and row_difference == directon:
+        if col_difference == 0 and row_difference == direction:
             return board[end_row][end_col] is None
 
         if (
