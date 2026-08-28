@@ -1,7 +1,7 @@
 import os
 import sys
 
-# Ensure Python can find the backend package
+# Ensure Python can resolve backend modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from flask import Flask, request, jsonify
@@ -11,10 +11,7 @@ app = Flask(__name__)
 game = Game()
 
 def square_to_coords(square_str):
-    """
-    Converts chess square string (e.g. 'e2') to 0-indexed row/col integers.
-    'e2' -> col=4, row=6 (assuming row 0 is top rank 8).
-    """
+    """Converts algebraic square (e.g. 'e2') to 0-indexed row and col."""
     if not square_str or len(square_str) != 2:
         return None, None
     
