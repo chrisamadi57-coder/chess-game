@@ -4,6 +4,8 @@ const messageDisplay = document.getElementById("message");
 
 let selectedSquare = null;
 let currentTurn = "white";
+let moveHistory = [];
+let gameOver = false;
 
 const pieces = {
     white: {
@@ -24,8 +26,14 @@ const pieces = {
     }
 };
 
+// This starting layout is only ever used for the very first paint,
+// before the server has had a chance to respond. From the moment
+// the first /api/new-game or /api/move response comes back, `board`
+// is fully replaced by whatever the server sends - it is never
+// patched or guessed at locally. That's deliberate: the server is
+// the single source of truth for game state, so the client can't
+// drift out of sync with it (which is what caused the old bug).
 let board = {
-    // Black pieces
     a8: { color: "black", piece: "rook" },
     b8: { color: "black", piece: "knight" },
     c8: { color: "black", piece: "bishop" },
@@ -43,7 +51,6 @@ let board = {
     g7: { color: "black", piece: "pawn" },
     h7: { color: "black", piece: "pawn" },
 
-    // White pieces
     a2: { color: "white", piece: "pawn" },
     b2: { color: "white", piece: "pawn" },
     c2: { color: "white", piece: "pawn" },
@@ -103,6 +110,8 @@ function addPieceToSquare(square, position) {
 }
 
 function handleSquareClick(event) {
+    if (gameOver) return;
+
     const square = event.currentTarget;
     const position = square.dataset.position;
 
@@ -129,15 +138,47 @@ function handleSquareClick(event) {
     const endPosition = position;
 
     removeSelection();
+    selectedSquare = null;
 
     if (startPosition === endPosition) {
-        selectedSquare = null;
         if (messageDisplay) messageDisplay.textContent = "Selection cancelled.";
         return;
     }
 
-    sendMoveToBackend(startPosition, endPosition);
-    selectedSquare = null;
+    const promotion = getPromotionChoice(startPosition, endPosition);
+
+    sendMoveToBackend(startPosition, endPosition, promotion);
+}
+
+function getPromotionChoice(start, end) {
+    // Only relevant for a pawn reaching the last rank. Defaults to
+    // queen if the piece isn't a pawn, the move isn't to the last
+    // rank, or the user cancels the prompt.
+    const moving = board[start];
+    const endRank = end[1];
+
+    const reachingLastRank =
+        moving &&
+        moving.piece === "pawn" &&
+        ((moving.color === "white" && endRank === "8") ||
+            (moving.color === "black" && endRank === "1"));
+
+    if (!reachingLastRank) return "Q";
+
+    const choice = window.prompt(
+        "Promote to (Q)ueen, (R)ook, (B)ishop, or K(N)ight?",
+        "Q"
+    );
+
+    if (!choice) return "Q";
+
+    const normalized = choice.trim().toUpperCase();
+
+    if (["Q", "R", "B", "N"].includes(normalized)) {
+        return normalized;
+    }
+
+    return "Q";
 }
 
 function removeSelection() {
@@ -147,7 +188,27 @@ function removeSelection() {
     });
 }
 
-function sendMoveToBackend(start, end) {
+function startNewGame() {
+    fetch("/api/new-game")
+        .then(response => response.json())
+        .then(data => {
+            applyServerState(data);
+            if (messageDisplay) messageDisplay.textContent = "New game started.";
+        })
+        .catch(error => {
+            // If the server can't be reached, fall back to the
+            // hardcoded starting position above so the board still
+            // renders something instead of staying blank.
+            console.error(error);
+            if (messageDisplay) {
+                messageDisplay.textContent =
+                    "Could not reach the server - showing the starting position offline.";
+            }
+            createBoard();
+        });
+}
+
+function sendMoveToBackend(start, end, promotion) {
     if (messageDisplay) messageDisplay.textContent = "Checking move...";
 
     fetch("/api/move", {
@@ -158,39 +219,70 @@ function sendMoveToBackend(start, end) {
         body: JSON.stringify({
             from: start,
             to: end,
-            color: currentTurn
+            promotion: promotion,
+            history: moveHistory
         })
     })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            updateBoard(start, end);
-            switchTurn();
-            if (messageDisplay) messageDisplay.textContent = "Move successful.";
-        } else {
-            if (messageDisplay) messageDisplay.textContent = data.message || "Invalid move.";
-        }
-    })
-    .catch(error => {
-        console.error(error);
-        if (messageDisplay) messageDisplay.textContent = "Could not connect to the Python backend.";
-    });
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                applyServerState(data);
+                announceStatus(data.status);
+            } else {
+                // A rejected move never touches local state, so
+                // there's nothing to roll back - the board the user
+                // sees is still exactly what the server last
+                // confirmed.
+                if (messageDisplay) messageDisplay.textContent = data.message || "Invalid move.";
+            }
+        })
+        .catch(error => {
+            console.error(error);
+            if (messageDisplay) messageDisplay.textContent = "Could not connect to the server.";
+        });
 }
 
-function updateBoard(start, end) {
-    const piece = board[start];
-    board[end] = piece;
-    delete board[start];
+function applyServerState(data) {
+    // The server's board is the only board. Replace, don't merge.
+    board = data.board;
+    currentTurn = data.turn;
+    moveHistory = data.history || [];
+
     createBoard();
+
+    if (turnDisplay) turnDisplay.textContent = `${capitalize(currentTurn)}'s turn`;
 }
 
-function switchTurn() {
-    currentTurn = currentTurn === "white" ? "black" : "white";
-    if (turnDisplay) turnDisplay.textContent = `${capitalize(currentTurn)}'s turn`;
+function announceStatus(status) {
+    if (!messageDisplay) return;
+
+    const gameOverStatuses = new Set([
+        "checkmate",
+        "stalemate",
+        "fivefold_repetition",
+        "seventy_five_move_draw",
+        "insufficient_material"
+    ]);
+
+    gameOver = gameOverStatuses.has(status);
+
+    const messages = {
+        checkmate: `Checkmate! ${capitalize(currentTurn === "white" ? "black" : "white")} wins.`,
+        stalemate: "Stalemate - it's a draw.",
+        check: `${capitalize(currentTurn)} is in check.`,
+        fivefold_repetition: "Draw by fivefold repetition.",
+        seventy_five_move_draw: "Draw by the 75-move rule.",
+        insufficient_material: "Draw - insufficient material.",
+        threefold_repetition: "Threefold repetition reached - a draw can be claimed.",
+        fifty_move_draw: "50-move rule reached - a draw can be claimed.",
+        ongoing: "Move successful."
+    };
+
+    messageDisplay.textContent = messages[status] || "Move successful.";
 }
 
 function capitalize(text) {
     return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-createBoard();
+startNewGame();
